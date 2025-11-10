@@ -1,0 +1,3 @@
+C:/Users/ARYAN/Desktop/NL2SQL/build/CMakeFiles/nl2sql_engine.dir
+C:/Users/ARYAN/Desktop/NL2SQL/build/CMakeFiles/edit_cache.dir
+C:/Users/ARYAN/Desktop/NL2SQL/build/CMakeFiles/rebuild_cache.dir

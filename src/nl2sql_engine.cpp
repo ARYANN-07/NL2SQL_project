@@ -4,6 +4,10 @@
 #include <map>
 #include <sstream>
 #include <unordered_set>
+
+#include <mysql.h> // This is the C API header
+
+#include <memory> // For std::unique_ptr
 using namespace std;
 
 class Tokenizer {
@@ -80,79 +84,321 @@ struct TableInfo
 
 class DatabaseSchema
 {
-    private:
+private:
     map<string, TableInfo> tables;
 
-    public:
+public:
     DatabaseSchema() {
-        initializeSchema(); //object create hote hi saare tables initialize hojayenge
+        initializeSchema(); // This will now connect to MySQL
     }
 
     void initializeSchema()
-    {
-        TableInfo account;
-        account.name="account";
-        account.columns={"acc_ID", "cust_ID", "acc_no", "name"};
-        tables["account"] = account; //adding table name and table info in tables map
+{
+    // This object is the connection handler
+    MYSQL *con = mysql_init(NULL);
 
-        TableInfo admin;
-        admin.name="admin";
-        admin.columns={"admin_id", "admin_name", "cust_ID"};
-        tables["admin"]= admin;
-
-        TableInfo billing;
-        billing.name="billing";
-        billing.columns={"meter_no", "acc_ID", "cust_ID", "monthly_unit", "per_unit", "amount"};
-        tables["billing"]= billing;
-        
-        TableInfo customer;
-        customer.name="customer";
-        customer.columns={"cust_ID", "cust_name", "address", "city", "pincode"};
-        tables["customer"]=customer;
-
-        TableInfo elec_board;
-        elec_board.name="elec_board";
-        elec_board.columns={"eboard_id", "board_name"};
-        tables["electric_board"]=elec_board;
-
-        TableInfo invoice;
-        invoice.name="invoice";
-        invoice.columns={"invoice_id", "eboard_ID", "tariff_ID", "acc_no", "meter_no", "date"};
-        tables["invoice"]=invoice;
-
-        TableInfo tariff;
-        tariff.name="tariff";
-        tariff.columns={"tariff_id", "tariff_type", "rate_per_unit"};
-        tables["tariff"]=tariff;
+    if (con == NULL) {
+        cout << "# ERROR: mysql_init() failed." << endl;
+        return;
     }
 
-    vector<string> getTableNames(){
+    // --- ⚠️ YOU MUST EDIT THESE DETAILS ---
+    string host = "127.0.0.1";
+    string user = "root";     // e.g., "root"
+    string pass = "root"; // e.g., "password"
+    string dbName = "sample_electricity_billing";   // e.g., "electricity_billing"
+    int port = 3306;
+    // --- END OF EDIT SECTION ---
+
+    // Try to connect
+    if (mysql_real_connect(con, host.c_str(), user.c_str(), pass.c_str(), dbName.c_str(), port, NULL, 0) == NULL) {
+        cout << "# ERROR: Could not connect to database." << endl;
+        cout << "# " << mysql_error(con) << endl;
+        mysql_close(con);
+        return;
+    }
+
+    // This is the same SQL query as before
+    string query = "SELECT table_name, column_name FROM INFORMATION_SCHEMA.COLUMNS "
+                   "WHERE table_schema = '" + dbName + "'";
+
+    // Send the query
+    if (mysql_query(con, query.c_str())) {
+        cout << "# ERROR: Query failed." << endl;
+        cout << "# " << mysql_error(con) << endl;
+        mysql_close(con);
+        return;
+    }
+
+    // Store the results
+    MYSQL_RES *result = mysql_store_result(con);
+    if (result == NULL) {
+        cout << "# ERROR: mysql_store_result() failed." << endl;
+        mysql_close(con);
+        return;
+    }
+
+    cout << "Reading schema from database '" << dbName << "'..." << endl;
+    
+    MYSQL_ROW row;
+    // Loop through the results row by row
+    while ((row = mysql_fetch_row(result))) {
+        string tableName = row[0] ? row[0] : "NULL";
+        string columnName = row[1] ? row[1] : "NULL";
+
+        // If this is the first time we see this table, create an entry for it
+        if (tables.find(tableName) == tables.end()) {
+            TableInfo newTable;
+            newTable.name = tableName;
+            tables[tableName] = newTable;
+        }
+        
+        // Add the column to its table's list
+        tables[tableName].columns.push_back(columnName);
+    }
+
+    cout << "Schema loaded successfully." << endl;
+
+    // Clean up
+    mysql_free_result(result);
+    mysql_close(con);
+}
+    // This function is new. It's needed for the "Hybrid" approach.
+    bool tableExists(string n) {
+        return tables.find(n) != tables.end();
+    }
+    
+    // This function is new. It's needed for the "Hybrid" approach.
+    bool columnExistsInTable(string col, string table) {
+        if (!tableExists(table)) {
+            return false;
+        }
+        for (const string& c : tables[table].columns) {
+            if (c == col) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // This is your old function, it's still useful
+    vector<string> getTableNames() {
         vector<string> names;
-        for(auto pair : tables){
+        for(auto const& pair : tables) {
             names.push_back(pair.first);
         }
         return names;
     }
+};
 
-    bool tableExists(string n){
-        bool exists=false;
-        for(auto pair: tables){
-            if(pair.first==n) exists=true;
+struct QueryComponent
+{
+    string select="select";
+    vector<string> select_fields;
+    vector<string> from_tables;
+    vector<string> where_conditions;
+};
+
+class PatternMatcher
+{
+private:
+    // This holds the live schema from main
+    DatabaseSchema& schema;
+
+    // --- SYNONYM DICTIONARIES ---
+    map<string, string> tableSynonyms = {
+        {"customer", "customer"},
+        {"customers", "customer"},
+        {"user", "customer"},
+        {"users", "customer"},
+        {"account", "account"},
+        {"accounts", "account"},
+        {"billing", "billing"},
+        {"bill", "billing"},
+        {"bills", "billing"},
+        {"admin", "admin"},
+        {"admins", "admin"},
+        {"electric", "elec_board"},
+        {"board", "elec_board"},
+        {"electricity", "elec_board"},
+        {"invoice", "invoice"},
+        {"invoices", "invoice"},
+        {"tariff", "tariff"},
+        {"tariffs", "tariff"},
+        {"rate", "tariff"}
+    };
+    
+    map<string, string> columnSynonyms = {
+        {"name", "cust_name"},
+        {"names", "cust_name"},
+        {"id", "cust_ID"},
+        {"customerid", "cust_ID"},
+        {"address", "address"},
+        {"city", "city"},
+        {"pincode", "pincode"},
+        {"pin", "pincode"},
+        {"zip", "pincode"},
+        {"accno", "acc_no"},
+        {"meter", "meter_no"},
+        {"meterno", "meter_no"},
+        {"amount", "amount"},
+        {"cost", "amount"},
+        {"bill", "amount"},
+        {"units", "monthly_unit"},
+        {"consumption", "monthly_unit"},
+        {"rate", "per_unit"},
+        {"adminname", "admin_name"},
+        {"tarifftype", "tariff_type"},
+        {"boardname", "board_name"}
+    };
+
+public:
+    // This constructor saves the live schema
+    PatternMatcher(DatabaseSchema& dbSchema) : schema(dbSchema) {}
+
+    QueryComponent extractComponent(const vector<string>& tokens)
+    {
+        QueryComponent components;
+        // These functions will now use the live schema
+        components.from_tables = extractTables(tokens); 
+        components.select_fields = extractColumns(tokens); 
+
+        return components;
+    }
+
+private:
+    vector<string> extractTables(const vector<string>& tokens)
+    {
+        vector<string> tables;
+        for (const string& token : tokens)
+        {
+            // Check if the token is a known synonym
+            auto it = tableSynonyms.find(token);
+            if (it != tableSynonyms.end())
+            {
+                // Get the "real" table name (e.g., "customer")
+                string realTable = it->second;
+
+                //    Check if this table *actually exists* in our live schema
+                if (schema.tableExists(realTable)) 
+                {
+                    // Add it only if we haven't already
+                    bool found = false;
+                    for(const string& t : tables) {
+                        if (t == realTable) found = true;
+                    }
+                    if (!found) {
+                        tables.push_back(realTable);
+                    }
+                }
+            }
         }
-        return exists;
+        return tables;
+    }
+
+    vector<string> extractColumns(const vector<string>& tokens)
+    {
+        vector<string> columns;
+        for (const string& token : tokens) {
+            if (token == "everything" || token == "details") {
+                columns.push_back("*");
+                return columns;
+            }
+        }
+
+        for (const string& token : tokens)
+        {
+            // Check if the token is a known synonym
+            auto it = columnSynonyms.find(token);
+            if (it != columnSynonyms.end())
+            {
+                // 2. Get the "real" column name 
+                string realColumn = it->second;
+
+                //    Here, we would ideally check if the column
+                //    exists in the tables we found.
+                //    For now, we just add it.
+                //
+                //    A better implementation would check:
+                //    schema.columnExistsInTable(realColumn, "some_table")
+                
+                // Add it only if we haven't already
+                bool found = false;
+                for(const string& c : columns) {
+                    if (c == realColumn) found = true;
+                }
+                if (!found) {
+                    columns.push_back(realColumn);
+                }
+            }
+        }
+
+        if (columns.empty()) {
+            columns.push_back("*");
+        }
+        return columns;
     }
 };
 
+class SQLBuilder 
+{
+public:
+    string buildQuery(const QueryComponent& components) 
+    {
+        string query = "SELECT ";
+        
+       
+        if (components.select_fields.empty())  // Add columns to select
+        {
+            query += "*";
+        }
+        
+        else 
+        {
+            for (int i = 0; i < components.select_fields.size(); i++) 
+            {
+                if (i > 0) query += ", ";
+                query += components.select_fields[i];
+            }
+        }
+        
+        
+        query += " FROM ";
+        if (components.from_tables.empty()) 
+        {
+            query += "customer";
+        } 
+        else 
+        {
+            query += components.from_tables[0]; 
+        }
+        
+        return query;
+    }
+};
 
-int main(){
-    // Tokenizer tokenizer;
-    // string temp = tokenizer.input();
-    // vector<string> simplified = tokenizer.tokenize(temp);
-    // for(string token : simplified){
-    //     cout<<token<<endl;
-    // }
+int main()
+{
+    Tokenizer tokenizer;
 
-    DatabaseSchema db;
-    cout<<db.tableExists("accout");
-    return 0;
+    // This line creates the schema object.
+    // The constructor calls initializeSchema(), which connects to the DB.
+    cout << "Attempting to load schema..." << endl;
+    DatabaseSchema schema; 
+    cout << "Schema loading complete." << endl;
+
+    // Pass the schema to the PatternMatcher.
+    PatternMatcher matcher(schema); 
+
+     SQLBuilder builder;
+
+     string temp=tokenizer.input(); // This runs AFTER the DB connection
+
+     vector<string> simplified = tokenizer.tokenize(temp);
+    QueryComponent components = matcher.extractComponent(simplified); 
+     string sql = builder.buildQuery(components); 
+    
+     cout << "Generated Query is: " << sql << endl;
+
+     return 0;
 }
