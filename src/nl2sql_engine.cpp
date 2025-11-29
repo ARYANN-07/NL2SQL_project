@@ -4,10 +4,15 @@
 #include <map>
 #include <sstream>
 #include <unordered_set>
+#include <unordered_map>
 
 #include <mysql.h> // This is the C API header
 
 #include <memory> // For std::unique_ptr
+using std::string;
+using std::vector;
+using std::unordered_map;
+
 using namespace std;
 
 class Tokenizer {
@@ -66,7 +71,7 @@ private:
     bool isStopWord(const string& word) {
         // It's static so it's only created once for the entire class.
         static const unordered_set<string> stopWords = {
-            "the", "a", "an", "but", "in", "on", "at", "to", "for", "is", 
+            "the", "a", "an", "but", "on", "at", "for", 
             "of", "with", "by", "are", "was", "were", "be", "been", "have", "has", 
             "had", "do", "does", "did", "will", "would", "shall", "should", "could",
             "me", "my", "i", "you", "what"
@@ -102,13 +107,13 @@ public:
         return;
     }
 
-    // --- ⚠️ YOU MUST EDIT THESE DETAILS ---
+    // --- IMP DETAILS TO CONNECT DATABASE ---
     string host = "127.0.0.1";
     string user = "root";     // e.g., "root"
     string pass = "root"; // e.g., "password"
-    string dbName = "sample_electricity_billing";   // e.g., "electricity_billing"
+    string dbName = "electricity";   // e.g., "electricity_billing"
     int port = 3306;
-    // --- END OF EDIT SECTION ---
+    
 
     // Try to connect
     if (mysql_real_connect(con, host.c_str(), user.c_str(), pass.c_str(), dbName.c_str(), port, NULL, 0) == NULL) {
@@ -163,12 +168,11 @@ public:
     mysql_free_result(result);
     mysql_close(con);
 }
-    // This function is new. It's needed for the "Hybrid" approach.
+
     bool tableExists(string n) {
         return tables.find(n) != tables.end();
     }
     
-    // This function is new. It's needed for the "Hybrid" approach.
     bool columnExistsInTable(string col, string table) {
         if (!tableExists(table)) {
             return false;
@@ -181,7 +185,6 @@ public:
         return false;
     }
 
-    // This is your old function, it's still useful
     vector<string> getTableNames() {
         vector<string> names;
         for(auto const& pair : tables) {
@@ -199,13 +202,16 @@ struct QueryComponent
     vector<string> where_conditions;
 };
 
+struct ValidationResult {
+    QueryComponent components;
+};
+
 class PatternMatcher
 {
 private:
     // This holds the live schema from main
     DatabaseSchema& schema;
 
-    // --- SYNONYM DICTIONARIES ---
     map<string, string> tableSynonyms = {
         {"customer", "customer"},
         {"customers", "customer"},
@@ -218,9 +224,10 @@ private:
         {"bills", "billing"},
         {"admin", "admin"},
         {"admins", "admin"},
-        {"electric", "elec_board"},
-        {"board", "elec_board"},
-        {"electricity", "elec_board"},
+        {"electric", "elecboard"},
+        {"board", "elecboard"},
+        {"eboard", "elecboard"},
+        {"electricity", "elecboard"},
         {"invoice", "invoice"},
         {"invoices", "invoice"},
         {"tariff", "tariff"},
@@ -229,39 +236,40 @@ private:
     };
     
     map<string, string> columnSynonyms = {
-        {"name", "cust_name"},
-        {"names", "cust_name"},
-        {"id", "cust_ID"},
-        {"customerid", "cust_ID"},
+        {"name", "custName"},
+        {"names", "custName"},
+        {"id", "custID"},
+        {"customerid", "custID"},
         {"address", "address"},
         {"city", "city"},
         {"pincode", "pincode"},
         {"pin", "pincode"},
         {"zip", "pincode"},
-        {"accno", "acc_no"},
-        {"meter", "meter_no"},
-        {"meterno", "meter_no"},
+        {"accno", "accNO"},
+        {"meter", "meterLine"},
+        {"meterno", "meterLine"},
         {"amount", "amount"},
         {"cost", "amount"},
         {"bill", "amount"},
-        {"units", "monthly_unit"},
-        {"consumption", "monthly_unit"},
-        {"rate", "per_unit"},
-        {"adminname", "admin_name"},
-        {"tarifftype", "tariff_type"},
-        {"boardname", "board_name"}
+        {"units", "unitsConsumed"},
+        {"consumption", "unitsConsumed"},
+        {"rate", "rate_per_unit"},
+        {"adminname", "adminName"},
+        {"tarifftype", "tariffType"},
+        {"boardname", "eboardName"}
     };
 
 public:
     // This constructor saves the live schema
     PatternMatcher(DatabaseSchema& dbSchema) : schema(dbSchema) {}
 
-    QueryComponent extractComponent(const vector<string>& tokens)
+    QueryComponent extractComponent(const vector<string>& tokens, vector<string>& warnings)
     {
         QueryComponent components;
-        // These functions will now use the live schema
+        
         components.from_tables = extractTables(tokens); 
         components.select_fields = extractColumns(tokens); 
+        components.where_conditions = extractConditions(tokens, columnSynonyms, warnings);
 
         return components;
     }
@@ -279,7 +287,7 @@ private:
                 // Get the "real" table name (e.g., "customer")
                 string realTable = it->second;
 
-                //    Check if this table *actually exists* in our live schema
+                //    Checkinf if this table *actually exists* in our live schema
                 if (schema.tableExists(realTable)) 
                 {
                     // Add it only if we haven't already
@@ -293,57 +301,314 @@ private:
                 }
             }
         }
+        if(tables.empty()) tables.push_back("customer"); //by default customer table
         return tables;
     }
 
-    vector<string> extractColumns(const vector<string>& tokens)
-    {
-        vector<string> columns;
-        for (const string& token : tokens) {
-            if (token == "everything" || token == "details") {
-                columns.push_back("*");
-                return columns;
-            }
-        }
+vector<string> extractColumns(const vector<string>& tokens)
+{
+    vector<string> columns;
 
-        for (const string& token : tokens)
-        {
-            // Check if the token is a known synonym
-            auto it = columnSynonyms.find(token);
-            if (it != columnSynonyms.end())
-            {
-                // 2. Get the "real" column name 
-                string realColumn = it->second;
-
-                //    Here, we would ideally check if the column
-                //    exists in the tables we found.
-                //    For now, we just add it.
-                //
-                //    A better implementation would check:
-                //    schema.columnExistsInTable(realColumn, "some_table")
-                
-                // Add it only if we haven't already
-                bool found = false;
-                for(const string& c : columns) {
-                    if (c == realColumn) found = true;
-                }
-                if (!found) {
-                    columns.push_back(realColumn);
-                }
-            }
+    // if user says "everything" or "details"
+    for (const string &token : tokens) {
+        if (token == "everything" || token == "details") {
+            return { "*" };
         }
-
-        if (columns.empty()) {
-            columns.push_back("*");
-        }
-        return columns;
     }
+
+    // go through all tokens and check synonyms
+    for (const string &token : tokens)
+    {
+        auto it = columnSynonyms.find(token);
+        if (it != columnSynonyms.end())
+        {
+            string realColumn = it->second;
+
+            // check if this column actually exists in schema
+            bool exists = false;
+            for (const string &tbl : schema.getTableNames()) {
+                if (schema.columnExistsInTable(realColumn, tbl)) {
+                    exists = true;
+                    break;
+                }
+            }
+
+            if (!exists)
+                continue; // skip if column doesn't exist
+
+            // avoid duplicates
+            bool found = false;
+            for (const string &c : columns) {
+                if (c == realColumn) {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found)
+                columns.push_back(realColumn);
+        }
+    }
+
+    if (columns.empty())
+        columns.push_back("*");
+
+    return columns;
+}
+
+// Helper: true if token is a known table name or a table synonym
+bool isTableToken(const string &tok) {
+    // check exact table name
+    if (schema.tableExists(tok)) return true;
+
+    // check synonyms map (tableSynonyms is your map<string,string>)
+    auto it = tableSynonyms.find(tok);
+    if (it != tableSynonyms.end()) return true;
+
+    // normalized check can be added later, keep minimal for now
+    return false;
+}
+
+    // Helper: check if a token looks like a number (allow commas and decimals)
+bool isNumberToken(const string &s) {
+    if (s.empty()) return false;
+    int digits = 0;
+    for (char c : s) {
+        if (std::isdigit((unsigned char)c)) digits++;
+        else if (c == '.' || c == ',') continue;
+        else return false;
+    }
+    return digits > 0;
+}
+
+vector<string> extractConditions(const vector<string>& tokens,
+                                 const map<string,string>& columnSynonyms,
+                                 vector<string>& warnings)
+{
+    vector<string> conditions;
+
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const string &tok = tokens[i];
+
+        
+        // handle "from state X" or "in state X" -> state = 'X'
+        if ((tok == "from" || tok == "in") && i + 2 < tokens.size()) {
+        if (tokens[i+1] == "state") {
+        string value = tokens[i+2];
+        conditions.push_back("state = '" + value + "'");
+        i += 2; // consumed 'state' and the state-name
+        continue;
+        }
+    }
+
+
+        // 2) "from X" or "in X" -> treat as city = 'X'
+        if ((tok == "from" || tok == "in") && i + 1 < tokens.size()) {
+            string next = tokens[i + 1];
+
+            // IF the next token is a table name (or synonym), treat it as table mention, NOT city
+            if (isTableToken(next)) {
+                ++i;
+                continue;
+            }
+
+            // otherwise treat it as city
+            conditions.push_back("city = '" + next + "'");
+            ++i; 
+            continue;
+        }
+
+
+        // 3) "between X and Y"
+        if (tok == "between" && i + 3 < tokens.size() && tokens[i+2] == "and") {
+    string a = tokens[i+1];
+    string b = tokens[i+3];
+
+    if (isNumberToken(a) && isNumberToken(b)) {
+        conditions.push_back("amount BETWEEN " + a + " AND " + b);
+    } else {
+        conditions.push_back("amount BETWEEN '" + a + "' AND '" + b + "'");
+    }
+    i += 3;
+    continue;
+}
+
+
+        // 4) amount / cost / bill comparisons
+        // amount / cost / bill -> only treat as WHERE if a real comparison exists
+// 4) amount / cost / bill numeric comparisons
+if (tok == "amount" || tok == "cost" || tok == "bill") {
+
+    string w1 = (i + 1 < tokens.size()) ? tokens[i+1] : "";
+    string w2 = (i + 2 < tokens.size()) ? tokens[i+2] : "";
+    string w3 = (i + 3 < tokens.size()) ? tokens[i+3] : "";
+
+    bool parsed = false;
+
+    // -----------------------------
+    //  amount more than 2000
+    //  amount is more than 2000
+    // -----------------------------
+    if ((w1 == "more" || w1 == "greater" || (w1 == "is" && w2 == "more") || (w1 == "is" && w2 == "greater")) &&
+        (w2 == "than" || w3 == "than"))
+    {
+        string val = "";
+        if (w2 == "than" && i + 3 < tokens.size() && isNumberToken(w3))
+            val = w3;
+        else if (w3 == "than" && i + 4 < tokens.size() && isNumberToken(tokens[i+4]))
+            val = tokens[i+4];
+
+        if (!val.empty()) {
+            conditions.push_back("amount > " + val);
+            parsed = true;
+            i += 3;  // skip tokens used
+        }
+    }
+
+    // -----------------------------
+    //  amount less than 500
+    //  amount is less than 500
+    // -----------------------------
+    else if ((w1 == "less" || (w1 == "is" && w2 == "less")) &&
+             (w2 == "than" || w3 == "than"))
+    {
+        string val = "";
+        if (w2 == "than" && i + 3 < tokens.size() && isNumberToken(w3))
+            val = w3;
+        else if (w3 == "than" && i + 4 < tokens.size() && isNumberToken(tokens[i+4]))
+            val = tokens[i+4];
+
+        if (!val.empty()) {
+            conditions.push_back("amount < " + val);
+            parsed = true;
+            i += 3;
+        }
+    }
+
+    // -----------------------------
+    //  amount equal to 400
+    //  amount is equal to 400
+    //  amount equals 400
+    // -----------------------------
+    else if (w1 == "equals" && isNumberToken(w2)) {
+        conditions.push_back("amount = " + w2);
+        parsed = true;
+        i += 2;
+    }
+    else if (w1 == "equal" && w2 == "to" && isNumberToken(w3)) {
+        conditions.push_back("amount = " + w3);
+        parsed = true;
+        i += 3;
+    }
+    else if (w1 == "is" && w2 == "equal" && w3 == "to" &&
+             i + 4 < tokens.size() && isNumberToken(tokens[i+4])) {
+        conditions.push_back("amount = " + tokens[i+4]);
+        parsed = true;
+        i += 4;
+    }
+
+    // If parsed, stop processing this token
+    if (parsed) continue;
+
+    // If the user started a comparison but gave no number — warn
+    bool startsComparison =
+        (w1 == "more" || w1 == "less" || w1 == "equals" || w1 == "equal" ||
+         w1 == "is" || w1 == ">" || w1 == "<" || w1 == ">=" || w1 == "<=");
+
+    if (startsComparison) {
+        warnings.push_back("Could not parse a numeric value after 'amount'.");
+    }
+
+//    parsed and NOT a comparison attempt → treat as SELECT column.
+    continue;
+}
+
+
+        // 5) contains / has / includes -> previous token is field name (e.g., "name contains john")
+        if ((tok == "contains" || tok == "has" || tok == "includes")) {
+    if (i > 0 && i + 1 < tokens.size()) {
+        string columnWord = tokens[i - 1];   // treat previous token as column name
+        string value = tokens[i + 1];        // value after 'contains'
+
+        // raw condition (mapping happens later in mapWhereUsingSynonyms)
+        conditions.push_back(columnWord + " LIKE '%" + value + "%'");
+
+        ++i; // skip value token
+        continue;
+    } else {
+        warnings.push_back("Found 'contains' but could not detect column or value.");
+        continue;
+    }
+}
+
+        // 6) "field in a b c" -> if token is a field name and next tokens look like values, collect some values
+        //    e.g., "city in pune mumbai" (we accept upto 3 tokens for simplicity)
+
+        // ignore pattern "in state X"
+        if (i + 2 < tokens.size()) {
+        if (tokens[i+1] == "in" && tokens[i+2] == "state") continue;  }
+
+        //Actual implementation of field in a b c
+    if (i + 2 < tokens.size() && tokens[i + 1] == "in") {
+
+    string columnWord = tok;  // treat current token as column
+
+    vector<string> vals;
+    size_t j = i + 2;
+
+    // collect up to 3 values (simple)
+    for (; j < tokens.size() && vals.size() < 3; ++j) {
+        string t = tokens[j];
+        if (t == "and" || t == "who" || t == "with" || t == "where")
+            break;
+        vals.push_back(t);
+    }
+
+    if (!vals.empty()) {
+        string clause = columnWord + " IN (";
+        for (size_t k = 0; k < vals.size(); ++k) {
+            if (k) clause += ", ";
+            clause += "'" + vals[k] + "'";
+        }
+        clause += ")";
+        conditions.push_back(clause);
+
+        i = j - 1; // advance index
+        continue;
+    }
+}
+
+    } // end loop tokens
+
+    return conditions;
+}
+
+
 };
+// Helper function: makes sure that all cols are from same table
+bool areColumnsValid(QueryComponent& components, DatabaseSchema &schema, vector<string> &warnings){
+    string tbl = components.from_tables[0];  // NOTE that table component is never empty(default customer)
+
+    // if SELECT *
+    if (components.select_fields.size() == 1 && components.select_fields[0] == "*") {
+        return true;
+    }
+
+    bool valid = true;
+
+    for (const string &col : components.select_fields) {
+        if (!schema.columnExistsInTable(col, tbl)) {
+            warnings.push_back("Column '" + col + "' does not exist in table '" + tbl + "'.");
+            valid = false;
+        }
+    }
+    return valid;
+}
 
 class SQLBuilder 
 {
 public:
-    string buildQuery(const QueryComponent& components) 
+    string buildQuery(const QueryComponent& components, vector<string>& warnings) 
     {
         string query = "SELECT ";
         
@@ -370,7 +635,21 @@ public:
         } 
         else 
         {
-            query += components.from_tables[0]; 
+            string tableToUse = components.from_tables[0];
+            query += tableToUse; 
+            if (components.from_tables.size() > 1) {
+                warnings.push_back("JOIN attempted. Multiple tables detected, but JOINs are disabled. Using only '" + tableToUse + "'.");
+            }
+        }
+
+        // WHERE clause: append conditions if any
+        if (!components.where_conditions.empty()) {
+            // If whereClauses refer to columns probably not in fromTable, you should validate earlier.
+            query += " WHERE ";
+            for (size_t i = 0; i < components.where_conditions.size(); ++i) {
+                if (i) query += " AND ";
+                query += components.where_conditions[i];
+            }
         }
         
         return query;
@@ -380,6 +659,7 @@ public:
 int main()
 {
     Tokenizer tokenizer;
+    vector<string> warning;
 
     // This line creates the schema object.
     // The constructor calls initializeSchema(), which connects to the DB.
@@ -395,9 +675,15 @@ int main()
      string temp=tokenizer.input(); // This runs AFTER the DB connection
 
      vector<string> simplified = tokenizer.tokenize(temp);
-    QueryComponent components = matcher.extractComponent(simplified); 
-     string sql = builder.buildQuery(components); 
-    
+    QueryComponent components = matcher.extractComponent(simplified, warning); 
+    bool valid = areColumnsValid(components, schema, warning); //check if all columns belong to same table
+     string sql = builder.buildQuery(components, warning); 
+
+    if(!warning.empty()){
+        for(int i=0; i<warning.size(); i++){
+            cout << "WARNING \n" << i + 1 << ": " << warning[i] << "\n";
+        }
+    }
      cout << "Generated Query is: " << sql << endl;
 
      return 0;

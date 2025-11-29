@@ -160,6 +160,8 @@ CMakeFiles/nl2sql_engine.dir/src/nl2sql_engine.cpp.obj: \
  C:/msys64/mingw64/include/c++/15.2.0/bits/hashtable.h \
  C:/msys64/mingw64/include/c++/15.2.0/bits/hashtable_policy.h \
  C:/msys64/mingw64/include/c++/15.2.0/bits/enable_special_members.h \
+ C:/msys64/mingw64/include/c++/15.2.0/unordered_map \
+ C:/msys64/mingw64/include/c++/15.2.0/bits/unordered_map.h \
  C:/msys64/mingw64/include/mysql/mysql.h \
  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/15.2.0/include/stdarg.h \
  C:/msys64/mingw64/include/stdarg.h \
